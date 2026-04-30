@@ -5,3 +5,4 @@ __pycache__/
 .DS_Store
 outputs/
 *.json
+product_generator.log
