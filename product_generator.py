@@ -23,6 +23,24 @@ REQUEST_DELAY_SECONDS = 2
 OUTPUT_PATH = Path("outputs/product_listings.json")
 
 
+def print_error(
+    function_name: str,
+    error: Exception,
+    location: str,
+    suggestion: str,
+    message: str | None = None,
+) -> None:
+    """Print a consistent, actionable error message."""
+    error_type = type(error).__name__
+    error_message = message or str(error)
+    print(
+        f"ERROR in {function_name}(): {error_type}\n"
+        f"  Location: {location}\n"
+        f"  Message: {error_message}\n"
+        f"  Suggestion: {suggestion}"
+    )
+
+
 class ProductData(BaseModel):
     """Validated product fields required to generate a listing."""
 
@@ -50,25 +68,93 @@ class ProductListing(BaseModel):
 
 
 def load_json_file(file_path: str | Path) -> dict:
-    """Load and parse a JSON file."""
-    with open(file_path, "r") as file:
-        return json.load(file)
+    """Load and parse a JSON file with error handling."""
+    try:
+        with open(file_path, "r") as file:
+            return json.load(file)
+    except FileNotFoundError as error:
+        print_error(
+            "load_json_file",
+            error,
+            f"File '{file_path}' not found",
+            "Check that the file path is correct and the file exists.",
+        )
+        raise
+    except PermissionError as error:
+        print_error(
+            "load_json_file",
+            error,
+            f"File '{file_path}' cannot be read",
+            "Check file permissions and make sure your user can read this file.",
+        )
+        raise
+    except json.JSONDecodeError as error:
+        print_error(
+            "load_json_file",
+            error,
+            f"File '{file_path}', line {error.lineno}, column {error.colno}",
+            "Check JSON syntax at the indicated location.",
+            error.msg,
+        )
+        raise
+    except OSError as error:
+        print_error(
+            "load_json_file",
+            error,
+            f"File '{file_path}'",
+            "Check that the path is accessible and is a valid file path.",
+        )
+        raise
 
 
 def save_json_file(data: Any, file_path: str | Path) -> None:
-    """Save data to a JSON file."""
-    output_path = Path(file_path)
-    output_path.parent.mkdir(exist_ok=True)
+    """Save data to a JSON file with error handling."""
+    try:
+        output_path = Path(file_path)
+        output_path.parent.mkdir(exist_ok=True)
 
-    with open(output_path, "w") as file:
-        json.dump(data, file, indent=2)
+        with open(output_path, "w") as file:
+            json.dump(data, file, indent=2)
+    except PermissionError as error:
+        print_error(
+            "save_json_file",
+            error,
+            f"File '{file_path}' cannot be written",
+            "Check output directory permissions or choose a writable path.",
+        )
+        raise
+    except TypeError as error:
+        print_error(
+            "save_json_file",
+            error,
+            f"File '{file_path}', data type '{type(data).__name__}'",
+            "Make sure the data only contains JSON-serializable values.",
+        )
+        raise
+    except OSError as error:
+        print_error(
+            "save_json_file",
+            error,
+            f"File '{file_path}'",
+            "Check that the output path is valid and the parent directory is writable.",
+        )
+        raise
 
 
 def product_row_to_dict(product_row: Any) -> dict:
     """Convert a pandas row or dictionary-like product into a plain dict."""
-    if hasattr(product_row, "to_dict"):
-        return product_row.to_dict()
-    return dict(product_row)
+    try:
+        if hasattr(product_row, "to_dict"):
+            return product_row.to_dict()
+        return dict(product_row)
+    except (TypeError, ValueError) as error:
+        print_error(
+            "product_row_to_dict",
+            error,
+            f"Input type '{type(product_row).__name__}'",
+            "Pass a pandas row, dictionary, or dictionary-like product object.",
+        )
+        raise
 
 
 def apply_price_override(product_dict: dict, price: float | None = None) -> dict:
@@ -84,34 +170,75 @@ def validate_product_data(product_dict: dict) -> bool:
     try:
         ProductData.model_validate(product_dict)
         return True
-    except ValidationError:
+    except ValidationError as error:
+        print_error(
+            "validate_product_data",
+            error,
+            "ProductData schema validation",
+            "Check required product fields: id, productDisplayName, masterCategory, baseColour, season, usage, image, and price.",
+        )
         return False
 
 
 def build_product_data(product_row: Any, price: float | None = None) -> ProductData:
     """Create validated product data from a dataset row."""
-    if isinstance(product_row, ProductData):
-        if price is None:
-            return product_row
-        product_row = product_row.model_dump(by_alias=True)
+    try:
+        if isinstance(product_row, ProductData):
+            if price is None:
+                return product_row
+            product_row = product_row.model_dump(by_alias=True)
 
-    product_dict = product_row_to_dict(product_row)
-    product_dict = apply_price_override(product_dict, price)
-    return ProductData.model_validate(product_dict)
+        product_dict = product_row_to_dict(product_row)
+        product_dict = apply_price_override(product_dict, price)
+        return ProductData.model_validate(product_dict)
+    except ValidationError as error:
+        print_error(
+            "build_product_data",
+            error,
+            "Product row validation",
+            "Check the product row contains valid dataset fields and compatible field types.",
+        )
+        raise
 
 
 def encode_image(pil_image: Any) -> str:
     """Convert PIL image to base64 string for API transmission."""
-    buffer = BytesIO()
-    pil_image.save(buffer, format="JPEG")
-    buffer.seek(0)
-    return base64.b64encode(buffer.read()).decode("utf-8")
+    try:
+        buffer = BytesIO()
+        pil_image.save(buffer, format="JPEG")
+        buffer.seek(0)
+        return base64.b64encode(buffer.read()).decode("utf-8")
+    except AttributeError as error:
+        print_error(
+            "encode_image",
+            error,
+            f"Input type '{type(pil_image).__name__}'",
+            "Pass a valid PIL image object with a save() method.",
+        )
+        raise
+    except OSError as error:
+        print_error(
+            "encode_image",
+            error,
+            "PIL image encoding as JPEG",
+            "Check that the image is valid and can be saved as JPEG.",
+        )
+        raise
 
 
 def create_product_prompt(product: ProductData | dict) -> str:
     """Generate OpenAI prompt for a product."""
-    if isinstance(product, dict):
-        product = ProductData.model_validate(product)
+    try:
+        if isinstance(product, dict):
+            product = ProductData.model_validate(product)
+    except ValidationError as error:
+        print_error(
+            "create_product_prompt",
+            error,
+            "Product prompt input validation",
+            "Pass a valid ProductData object or dictionary with all required product fields.",
+        )
+        raise
 
     return f"""You are an expert e-commerce copywriter. Analyze the product image and create a compelling product listing.
 
@@ -157,7 +284,16 @@ def create_product_listing_prompt(product_name, price, category, additional_info
 
 def extract_json_from_text(raw_text: str) -> str:
     """Extract JSON content from a plain or markdown-fenced response."""
-    clean_response = raw_text.strip()
+    try:
+        clean_response = raw_text.strip()
+    except AttributeError as error:
+        print_error(
+            "extract_json_from_text",
+            error,
+            f"Response text type '{type(raw_text).__name__}'",
+            "Pass response content as a string before parsing JSON.",
+        )
+        raise
 
     if "```json" in clean_response:
         return clean_response.split("```json", 1)[1].split("```", 1)[0].strip()
@@ -169,42 +305,95 @@ def extract_json_from_text(raw_text: str) -> str:
 
 def get_response_text(response: Any) -> str:
     """Read message content from an OpenAI response object or test dictionary."""
-    if isinstance(response, dict):
-        return response["choices"][0]["message"]["content"]
-    return response.choices[0].message.content
+    try:
+        if isinstance(response, dict):
+            return response["choices"][0]["message"]["content"]
+        return response.choices[0].message.content
+    except (AttributeError, IndexError, KeyError, TypeError) as error:
+        print_error(
+            "get_response_text",
+            error,
+            "OpenAI response choices[0].message.content",
+            "Check that the API response includes choices with message content.",
+        )
+        raise
 
 
 def parse_api_response(response: Any) -> dict:
     """Parse and validate an OpenAI API response."""
-    raw_response = get_response_text(response)
-    json_text = extract_json_from_text(raw_response)
-    listing = json.loads(json_text)
-    return validate_listing_data(listing).model_dump()
+    try:
+        raw_response = get_response_text(response)
+        json_text = extract_json_from_text(raw_response)
+        listing = json.loads(json_text)
+        return validate_listing_data(listing).model_dump()
+    except json.JSONDecodeError as error:
+        print_error(
+            "parse_api_response",
+            error,
+            f"API response JSON, line {error.lineno}, column {error.colno}",
+            "Check that the model returned valid JSON and did not include extra prose.",
+            error.msg,
+        )
+        raise
+    except ValidationError as error:
+        print_error(
+            "parse_api_response",
+            error,
+            "ProductListing schema validation",
+            "Check that the response contains title, description, features, and keywords.",
+        )
+        raise
 
 
 def validate_listing_data(listing_dict: dict) -> ProductListing:
     """Validate generated product listing data."""
-    return ProductListing.model_validate(listing_dict)
+    try:
+        return ProductListing.model_validate(listing_dict)
+    except ValidationError as error:
+        print_error(
+            "validate_listing_data",
+            error,
+            "ProductListing schema validation",
+            "Check that listing data contains title, description, features, and keywords with valid types.",
+        )
+        raise
 
 
 def format_output(product: ProductData | dict, result: dict) -> dict:
     """Format final output for one processed product."""
-    if isinstance(product, dict):
-        product = ProductData.model_validate(product)
+    try:
+        if isinstance(product, dict):
+            product = ProductData.model_validate(product)
 
-    output = {
-        "id": product.id,
-        "product_name": product.product_name,
-        "category": product.category,
-        "status": result["status"],
-    }
+        output = {
+            "id": product.id,
+            "product_name": product.product_name,
+            "category": product.category,
+            "status": result["status"],
+        }
 
-    if result["status"] == "success":
-        output["listing"] = result["listing"]
-    else:
-        output["error"] = result["error"]
+        if result["status"] == "success":
+            output["listing"] = result["listing"]
+        else:
+            output["error"] = result["error"]
 
-    return output
+        return output
+    except ValidationError as error:
+        print_error(
+            "format_output",
+            error,
+            "Product output formatting",
+            "Pass a valid ProductData object or product dictionary.",
+        )
+        raise
+    except KeyError as error:
+        print_error(
+            "format_output",
+            error,
+            f"Missing result key {error}",
+            "Result must include status plus listing for success or error for failures.",
+        )
+        raise
 
 
 def create_messages(encoded_image: str, prompt: str) -> list[dict]:
@@ -242,11 +431,20 @@ def call_listing_api(
     max_tokens: int = DEFAULT_MAX_TOKENS,
 ) -> Any:
     """Call the OpenAI API for a product listing."""
-    return client.chat.completions.create(
-        model=model,
-        max_tokens=max_tokens,
-        messages=messages,
-    )
+    try:
+        return client.chat.completions.create(
+            model=model,
+            max_tokens=max_tokens,
+            messages=messages,
+        )
+    except Exception as error:
+        print_error(
+            "call_listing_api",
+            error,
+            f"OpenAI chat.completions.create model='{model}', max_tokens={max_tokens}",
+            "Check your API key, network connection, model name, quota, and rate limits.",
+        )
+        raise
 
 
 def create_success_result(listing: dict) -> dict:
@@ -303,12 +501,30 @@ def generate_product_listing(
 
 def load_product_dataset_split(dataset_name: str = DATASET_NAME, split: str = DATASET_SPLIT) -> Any:
     """Load product data from HuggingFace."""
-    return load_dataset(dataset_name, split=split)
+    try:
+        return load_dataset(dataset_name, split=split)
+    except Exception as error:
+        print_error(
+            "load_product_dataset_split",
+            error,
+            f"Dataset '{dataset_name}', split '{split}'",
+            "Check the dataset name, split string, internet connection, and HuggingFace availability.",
+        )
+        raise
 
 
 def dataset_to_dataframe(dataset: Any) -> pd.DataFrame:
     """Convert a dataset into a DataFrame."""
-    return pd.DataFrame(dataset)
+    try:
+        return pd.DataFrame(dataset)
+    except Exception as error:
+        print_error(
+            "dataset_to_dataframe",
+            error,
+            f"Dataset type '{type(dataset).__name__}'",
+            "Check that the loaded dataset is tabular or convertible to a pandas DataFrame.",
+        )
+        raise
 
 
 def load_product_dataset(dataset_name: str = DATASET_NAME, split: str = DATASET_SPLIT) -> pd.DataFrame:
@@ -328,8 +544,17 @@ def summarize_results(results: list[dict]) -> dict:
 
 def get_product_rows(df: pd.DataFrame, num_products: int) -> list[Any]:
     """Return the product rows selected for processing."""
-    total = min(num_products, len(df))
-    return [df.iloc[i] for i in range(total)]
+    try:
+        total = min(num_products, len(df))
+        return [df.iloc[i] for i in range(total)]
+    except (AttributeError, TypeError, ValueError) as error:
+        print_error(
+            "get_product_rows",
+            error,
+            f"DataFrame type '{type(df).__name__}', num_products={num_products}",
+            "Pass a pandas DataFrame and a non-negative integer product count.",
+        )
+        raise
 
 
 def process_product(product: ProductData, client: OpenAI) -> dict:
@@ -340,8 +565,17 @@ def process_product(product: ProductData, client: OpenAI) -> dict:
 
 def process_product_row(product_row: Any, client: OpenAI) -> dict:
     """Validate and process one product row."""
-    product = build_product_data(product_row)
-    return process_product(product, client)
+    try:
+        product = build_product_data(product_row)
+        return process_product(product, client)
+    except Exception as error:
+        print_error(
+            "process_product_row",
+            error,
+            "Single product row processing",
+            "Check the product row fields, image value, API client, and API response format.",
+        )
+        raise
 
 
 def wait_before_next_request(current_index: int, total: int, request_delay: int) -> None:
@@ -444,8 +678,24 @@ def create_openai_client() -> OpenAI:
     """Initialize the OpenAI client from environment variables."""
     api_key = os.getenv("OPENAI_API_KEY")
     if not api_key:
-        raise ValueError("OPENAI_API_KEY is not set")
-    return OpenAI(api_key=api_key)
+        error = ValueError("OPENAI_API_KEY is not set")
+        print_error(
+            "create_openai_client",
+            error,
+            "Environment variable OPENAI_API_KEY",
+            "Add OPENAI_API_KEY to your .env file or shell environment.",
+        )
+        raise error
+    try:
+        return OpenAI(api_key=api_key)
+    except Exception as error:
+        print_error(
+            "create_openai_client",
+            error,
+            "OpenAI client initialization",
+            "Check that the OpenAI package is installed and the API key value is valid.",
+        )
+        raise
 
 
 def main() -> None:
