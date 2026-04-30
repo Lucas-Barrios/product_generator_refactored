@@ -1,0 +1,12 @@
+{
+  "test_case": "api_error",
+  "wrapper_function": "OpenAIWrapper.create_chat_completion",
+  "calling_function": "call_listing_api",
+  "error_type": "RuntimeError",
+  "attempts": 2,
+  "model": "gpt-4o",
+  "max_tokens": 1000,
+  "message": "simulated API rate limit",
+  "suggestion": "Check your API key, network connection, model name, quota, and rate limits.",
+  "result": "The error output shows each failed API retry and the final API failure location."
+}

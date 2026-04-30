@@ -1,0 +1,9 @@
+{
+  "test_case": "missing_file",
+  "function": "load_json_file",
+  "error_type": "FileNotFoundError",
+  "location": "File '/var/folders/.../missing.json' not found",
+  "message": "[Errno 2] No such file or directory: '/var/folders/.../missing.json'",
+  "suggestion": "Check that the file path is correct and the file exists.",
+  "result": "The error identifies the function where the failure occurred and the missing file path."
+}

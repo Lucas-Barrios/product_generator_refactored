@@ -1,0 +1,32 @@
+{
+  "test_cases": [
+    {
+      "name": "missing_file",
+      "function": "load_json_file",
+      "error_type": "FileNotFoundError",
+      "location": "File '/var/folders/.../missing.json' not found",
+      "suggestion": "Check that the file path is correct and the file exists."
+    },
+    {
+      "name": "invalid_json",
+      "function": "load_json_file",
+      "error_type": "JSONDecodeError",
+      "location": "File '/var/folders/.../invalid.json', line 2, column 3",
+      "suggestion": "Check JSON syntax at the indicated location."
+    },
+    {
+      "name": "invalid_product_data",
+      "function": "validate_product_data",
+      "error_type": "ValidationError",
+      "location": "ProductData schema validation",
+      "suggestion": "Check required product fields: id, productDisplayName, masterCategory, baseColour, season, usage, image, and price."
+    },
+    {
+      "name": "api_error",
+      "function": "call_listing_api",
+      "error_type": "RuntimeError",
+      "location": "OpenAI API failed after 2 attempt(s)",
+      "suggestion": "Check your API key, network connection, model name, quota, and rate limits."
+    }
+  ]
+}

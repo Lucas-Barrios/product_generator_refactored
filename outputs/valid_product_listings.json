@@ -1,0 +1,20 @@
+[
+  {
+    "id": 101,
+    "product_name": "Test Black Shirt",
+    "category": "Apparel",
+    "status": "success",
+    "listing": {
+      "title": "Classic Black Casual Shirt",
+      "description": "A clean product description for a black casual shirt.",
+      "features": [
+        "Black color",
+        "Casual style",
+        "Everyday wear",
+        "Lightweight look",
+        "Simple design"
+      ],
+      "keywords": "black shirt, casual shirt, apparel, everyday wear"
+    }
+  }
+]
