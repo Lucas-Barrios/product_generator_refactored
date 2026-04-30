@@ -71,6 +71,14 @@ def product_row_to_dict(product_row: Any) -> dict:
     return dict(product_row)
 
 
+def apply_price_override(product_dict: dict, price: float | None = None) -> dict:
+    """Return product data with an optional price override."""
+    product_data = product_dict.copy()
+    if price is not None:
+        product_data["price"] = price
+    return product_data
+
+
 def validate_product_data(product_dict: dict) -> bool:
     """Validate product data using Pydantic."""
     try:
@@ -82,9 +90,13 @@ def validate_product_data(product_dict: dict) -> bool:
 
 def build_product_data(product_row: Any, price: float | None = None) -> ProductData:
     """Create validated product data from a dataset row."""
+    if isinstance(product_row, ProductData):
+        if price is None:
+            return product_row
+        product_row = product_row.model_dump(by_alias=True)
+
     product_dict = product_row_to_dict(product_row)
-    if price is not None:
-        product_dict["price"] = price
+    product_dict = apply_price_override(product_dict, price)
     return ProductData.model_validate(product_dict)
 
 
@@ -167,7 +179,12 @@ def parse_api_response(response: Any) -> dict:
     raw_response = get_response_text(response)
     json_text = extract_json_from_text(raw_response)
     listing = json.loads(json_text)
-    return ProductListing.model_validate(listing).model_dump()
+    return validate_listing_data(listing).model_dump()
+
+
+def validate_listing_data(listing_dict: dict) -> ProductListing:
+    """Validate generated product listing data."""
+    return ProductListing.model_validate(listing_dict)
 
 
 def format_output(product: ProductData | dict, result: dict) -> dict:
@@ -211,35 +228,93 @@ def create_messages(encoded_image: str, prompt: str) -> list[dict]:
     ]
 
 
-def generate_product_listing(
-    product_row: Any,
+def build_product_messages(product: ProductData) -> list[dict]:
+    """Create API messages for one product."""
+    encoded_image = encode_image(product.image)
+    prompt = create_product_prompt(product)
+    return create_messages(encoded_image, prompt)
+
+
+def call_listing_api(
     client: OpenAI,
-    price: float = DEFAULT_PRICE,
+    messages: list[dict],
+    model: str = DEFAULT_MODEL,
+    max_tokens: int = DEFAULT_MAX_TOKENS,
+) -> Any:
+    """Call the OpenAI API for a product listing."""
+    return client.chat.completions.create(
+        model=model,
+        max_tokens=max_tokens,
+        messages=messages,
+    )
+
+
+def create_success_result(listing: dict) -> dict:
+    """Create a successful processing result."""
+    return {"status": "success", "listing": listing}
+
+
+def create_error_result(error: Exception) -> dict:
+    """Create a failed processing result."""
+    return {"status": "error", "error": str(error)}
+
+
+def generate_listing_for_product(
+    product: ProductData,
+    client: OpenAI,
     model: str = DEFAULT_MODEL,
     max_tokens: int = DEFAULT_MAX_TOKENS,
 ) -> dict:
-    """Send image and metadata to GPT-4 Vision and get product listing."""
+    """Generate a listing for one validated product."""
+    messages = build_product_messages(product)
+    response = call_listing_api(client, messages, model, max_tokens)
+    listing = parse_api_response(response)
+    return create_success_result(listing)
+
+
+def safely_generate_listing_for_product(
+    product: ProductData,
+    client: OpenAI,
+    model: str = DEFAULT_MODEL,
+    max_tokens: int = DEFAULT_MAX_TOKENS,
+) -> dict:
+    """Generate a listing and convert failures into result data."""
+    try:
+        return generate_listing_for_product(product, client, model, max_tokens)
+    except Exception as error:
+        return create_error_result(error)
+
+
+def generate_product_listing(
+    product_row: Any,
+    client: OpenAI,
+    price: float | None = DEFAULT_PRICE,
+    model: str = DEFAULT_MODEL,
+    max_tokens: int = DEFAULT_MAX_TOKENS,
+) -> dict:
+    """Build product data and generate a listing."""
     try:
         product = build_product_data(product_row, price)
-        encoded_image = encode_image(product.image)
-        prompt = create_product_prompt(product)
-
-        response = client.chat.completions.create(
-            model=model,
-            max_tokens=max_tokens,
-            messages=create_messages(encoded_image, prompt),
-        )
-
-        return {"status": "success", "listing": parse_api_response(response)}
+        return generate_listing_for_product(product, client, model, max_tokens)
 
     except Exception as error:
-        return {"status": "error", "error": str(error)}
+        return create_error_result(error)
+
+
+def load_product_dataset_split(dataset_name: str = DATASET_NAME, split: str = DATASET_SPLIT) -> Any:
+    """Load product data from HuggingFace."""
+    return load_dataset(dataset_name, split=split)
+
+
+def dataset_to_dataframe(dataset: Any) -> pd.DataFrame:
+    """Convert a dataset into a DataFrame."""
+    return pd.DataFrame(dataset)
 
 
 def load_product_dataset(dataset_name: str = DATASET_NAME, split: str = DATASET_SPLIT) -> pd.DataFrame:
-    """Load product data from HuggingFace."""
-    dataset = load_dataset(dataset_name, split=split)
-    return pd.DataFrame(dataset)
+    """Load product data and return it as a DataFrame."""
+    dataset = load_product_dataset_split(dataset_name, split)
+    return dataset_to_dataframe(dataset)
 
 
 def summarize_results(results: list[dict]) -> dict:
@@ -251,46 +326,116 @@ def summarize_results(results: list[dict]) -> dict:
     }
 
 
+def get_product_rows(df: pd.DataFrame, num_products: int) -> list[Any]:
+    """Return the product rows selected for processing."""
+    total = min(num_products, len(df))
+    return [df.iloc[i] for i in range(total)]
+
+
+def process_product(product: ProductData, client: OpenAI) -> dict:
+    """Process one validated product."""
+    result = safely_generate_listing_for_product(product, client)
+    return format_output(product, result)
+
+
+def process_product_row(product_row: Any, client: OpenAI) -> dict:
+    """Validate and process one product row."""
+    product = build_product_data(product_row)
+    return process_product(product, client)
+
+
+def wait_before_next_request(current_index: int, total: int, request_delay: int) -> None:
+    """Pause between API requests."""
+    if current_index < total - 1:
+        time.sleep(request_delay)
+
+
+def print_processing_header(total: int) -> None:
+    """Print the batch processing header."""
+    print(f"\nProcessing {total} products...")
+    print("=" * 50)
+
+
+def print_product_progress(index: int, total: int, product_name: str) -> None:
+    """Print progress for one product."""
+    print(f"\n[{index + 1}/{total}] Processing: {product_name}")
+
+
+def print_result_status(result: dict) -> None:
+    """Print the status for one generated listing."""
+    if result["status"] == "success":
+        print("✓ Listing generated successfully")
+    else:
+        print(f"✗ Failed: {result['error']}")
+
+
+def print_wait_message(current_index: int, total: int, request_delay: int) -> None:
+    """Print the request delay message."""
+    if current_index < total - 1:
+        print(f"  Waiting {request_delay} seconds before next request...")
+
+
+def print_summary(summary: dict, output_path: Path) -> None:
+    """Print the batch processing summary."""
+    print("\n" + "=" * 50)
+    print(f"✓ Processed {summary['processed']} products")
+    print(f"✓ Successful: {summary['successful']}")
+    print(f"✗ Failed: {summary['failed']}")
+    print(f"✓ Results saved to {output_path}")
+
+
 def process_multiple_products(
+    df: pd.DataFrame,
+    client: OpenAI,
+    num_products: int = DEFAULT_NUM_PRODUCTS,
+    request_delay: int = REQUEST_DELAY_SECONDS,
+) -> list[dict]:
+    """Process multiple products."""
+    results = []
+    product_rows = get_product_rows(df, num_products)
+
+    for i, product_row in enumerate(product_rows):
+        product = build_product_data(product_row)
+        results.append(process_product(product, client))
+        wait_before_next_request(i, len(product_rows), request_delay)
+
+    return results
+
+
+def save_results(results: list[dict], output_path: str | Path = OUTPUT_PATH) -> None:
+    """Save product listing results."""
+    save_json_file(results, output_path)
+
+
+def run_product_batch(
     df: pd.DataFrame,
     client: OpenAI,
     num_products: int = DEFAULT_NUM_PRODUCTS,
     output_path: Path = OUTPUT_PATH,
     request_delay: int = REQUEST_DELAY_SECONDS,
 ) -> list[dict]:
-    """Generate listings for multiple products and save results."""
+    """Run product processing, reporting, and saving."""
     results = []
-    total = min(num_products, len(df))
+    product_rows = get_product_rows(df, num_products)
+    total = len(product_rows)
 
-    print(f"\nProcessing {total} products...")
-    print("=" * 50)
+    print_processing_header(total)
 
-    for i in range(total):
-        product_row = df.iloc[i]
+    for i, product_row in enumerate(product_rows):
         product = build_product_data(product_row)
+        print_product_progress(i, total, product.product_name)
 
-        print(f"\n[{i + 1}/{total}] Processing: {product.product_name}")
+        formatted_result = process_product(product, client)
+        results.append(formatted_result)
 
-        result = generate_product_listing(product_row, client)
-        results.append(format_output(product, result))
+        print_result_status(formatted_result)
+        print_wait_message(i, total, request_delay)
+        wait_before_next_request(i, total, request_delay)
 
-        if result["status"] == "success":
-            print("✓ Listing generated successfully")
-        else:
-            print(f"✗ Failed: {result['error']}")
-
-        if i < total - 1:
-            print(f"  Waiting {request_delay} seconds before next request...")
-            time.sleep(request_delay)
-
-    save_json_file(results, output_path)
+    save_results(results, output_path)
 
     summary = summarize_results(results)
-    print("\n" + "=" * 50)
-    print(f"✓ Processed {summary['processed']} products")
-    print(f"✓ Successful: {summary['successful']}")
-    print(f"✗ Failed: {summary['failed']}")
-    print(f"✓ Results saved to {output_path}")
+    print_summary(summary, output_path)
 
     return results
 
@@ -314,7 +459,7 @@ def main() -> None:
     products_df = load_product_dataset()
     print(f"✓ Loaded {len(products_df)} products")
 
-    process_multiple_products(products_df, client, num_products=DEFAULT_NUM_PRODUCTS)
+    run_product_batch(products_df, client, num_products=DEFAULT_NUM_PRODUCTS)
 
 
 if __name__ == "__main__":
