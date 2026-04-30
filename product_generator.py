@@ -20,6 +20,8 @@ DEFAULT_PRICE = 49.99
 DEFAULT_MAX_TOKENS = 1000
 DEFAULT_NUM_PRODUCTS = 3
 REQUEST_DELAY_SECONDS = 2
+DEFAULT_MAX_RETRIES = 3
+DEFAULT_BACKOFF_SECONDS = 1
 OUTPUT_PATH = Path("outputs/product_listings.json")
 
 
@@ -65,6 +67,111 @@ class ProductListing(BaseModel):
     description: str
     features: list[str]
     keywords: str
+
+
+class OpenAIWrapper:
+    """Wrapper for OpenAI API calls with error handling and retry logic."""
+
+    def __init__(
+        self,
+        api_key: str | None = None,
+        max_retries: int = DEFAULT_MAX_RETRIES,
+        backoff_seconds: int | float = DEFAULT_BACKOFF_SECONDS,
+        client: Any | None = None,
+    ):
+        if client is None and not api_key:
+            error = ValueError("OPENAI_API_KEY is not set")
+            print_error(
+                "OpenAIWrapper.__init__",
+                error,
+                "OpenAI wrapper initialization",
+                "Pass an API key or provide a preconfigured OpenAI-compatible client.",
+            )
+            raise error
+
+        self.max_retries = max(1, max_retries)
+        self.backoff_seconds = backoff_seconds
+        self.client = client or OpenAI(api_key=api_key)
+
+    def get_retry_delay(self, attempt: int) -> int | float:
+        """Calculate exponential backoff delay for an attempt."""
+        return self.backoff_seconds * (2 ** (attempt - 1))
+
+    def create_success_response(self, response: Any, attempts: int) -> dict:
+        """Create a standardized successful API response."""
+        return {
+            "status": "success",
+            "response": response,
+            "attempts": attempts,
+        }
+
+    def create_error_response(self, error: Exception, attempts: int) -> dict:
+        """Create a standardized failed API response."""
+        return {
+            "status": "error",
+            "error_type": type(error).__name__,
+            "error": str(error),
+            "attempts": attempts,
+        }
+
+    def create_chat_completion(
+        self,
+        messages: list[dict],
+        model: str = DEFAULT_MODEL,
+        max_tokens: int = DEFAULT_MAX_TOKENS,
+    ) -> dict:
+        """Create a chat completion with retry logic."""
+        last_error = None
+
+        for attempt in range(1, self.max_retries + 1):
+            try:
+                response = self.client.chat.completions.create(
+                    model=model,
+                    max_tokens=max_tokens,
+                    messages=messages,
+                )
+                return self.create_success_response(response, attempt)
+            except Exception as error:
+                last_error = error
+                print_error(
+                    "OpenAIWrapper.create_chat_completion",
+                    error,
+                    f"Attempt {attempt}/{self.max_retries}, model='{model}', max_tokens={max_tokens}",
+                    "Check your API key, network connection, model name, quota, and rate limits.",
+                )
+
+                if attempt < self.max_retries:
+                    time.sleep(self.get_retry_delay(attempt))
+
+        return self.create_error_response(last_error, self.max_retries)
+
+    def generate_description(
+        self,
+        prompt: str,
+        model: str = DEFAULT_MODEL,
+        max_tokens: int = DEFAULT_MAX_TOKENS,
+    ) -> dict:
+        """Generate text from a prompt with retry logic."""
+        messages = [{"role": "user", "content": prompt}]
+        api_result = self.create_chat_completion(messages, model, max_tokens)
+
+        if api_result["status"] == "error":
+            return api_result
+
+        try:
+            return {
+                "status": "success",
+                "description": get_response_text(api_result["response"]),
+                "attempts": api_result["attempts"],
+            }
+        except Exception as error:
+            print_error(
+                "OpenAIWrapper.generate_description",
+                error,
+                "OpenAI response text extraction",
+                "Check that the API response includes choices[0].message.content.",
+            )
+            return self.create_error_response(error, api_result["attempts"])
 
 
 def load_json_file(file_path: str | Path) -> dict:
@@ -425,26 +532,27 @@ def build_product_messages(product: ProductData) -> list[dict]:
 
 
 def call_listing_api(
-    client: OpenAI,
+    api_client: Any,
     messages: list[dict],
     model: str = DEFAULT_MODEL,
     max_tokens: int = DEFAULT_MAX_TOKENS,
 ) -> Any:
-    """Call the OpenAI API for a product listing."""
-    try:
-        return client.chat.completions.create(
-            model=model,
-            max_tokens=max_tokens,
-            messages=messages,
-        )
-    except Exception as error:
+    """Call the OpenAI API for a product listing through the wrapper."""
+    wrapper = api_client if isinstance(api_client, OpenAIWrapper) else OpenAIWrapper(client=api_client)
+    api_result = wrapper.create_chat_completion(messages, model, max_tokens)
+
+    if api_result["status"] == "error":
+        error = RuntimeError(api_result["error"])
         print_error(
             "call_listing_api",
             error,
-            f"OpenAI chat.completions.create model='{model}', max_tokens={max_tokens}",
+            f"OpenAI API failed after {api_result['attempts']} attempt(s)",
             "Check your API key, network connection, model name, quota, and rate limits.",
+            api_result["error"],
         )
-        raise
+        raise error
+
+    return api_result["response"]
 
 
 def create_success_result(listing: dict) -> dict:
@@ -459,33 +567,33 @@ def create_error_result(error: Exception) -> dict:
 
 def generate_listing_for_product(
     product: ProductData,
-    client: OpenAI,
+    api_client: Any,
     model: str = DEFAULT_MODEL,
     max_tokens: int = DEFAULT_MAX_TOKENS,
 ) -> dict:
     """Generate a listing for one validated product."""
     messages = build_product_messages(product)
-    response = call_listing_api(client, messages, model, max_tokens)
+    response = call_listing_api(api_client, messages, model, max_tokens)
     listing = parse_api_response(response)
     return create_success_result(listing)
 
 
 def safely_generate_listing_for_product(
     product: ProductData,
-    client: OpenAI,
+    api_client: Any,
     model: str = DEFAULT_MODEL,
     max_tokens: int = DEFAULT_MAX_TOKENS,
 ) -> dict:
     """Generate a listing and convert failures into result data."""
     try:
-        return generate_listing_for_product(product, client, model, max_tokens)
+        return generate_listing_for_product(product, api_client, model, max_tokens)
     except Exception as error:
         return create_error_result(error)
 
 
 def generate_product_listing(
     product_row: Any,
-    client: OpenAI,
+    api_client: Any,
     price: float | None = DEFAULT_PRICE,
     model: str = DEFAULT_MODEL,
     max_tokens: int = DEFAULT_MAX_TOKENS,
@@ -493,7 +601,7 @@ def generate_product_listing(
     """Build product data and generate a listing."""
     try:
         product = build_product_data(product_row, price)
-        return generate_listing_for_product(product, client, model, max_tokens)
+        return generate_listing_for_product(product, api_client, model, max_tokens)
 
     except Exception as error:
         return create_error_result(error)
@@ -557,17 +665,17 @@ def get_product_rows(df: pd.DataFrame, num_products: int) -> list[Any]:
         raise
 
 
-def process_product(product: ProductData, client: OpenAI) -> dict:
+def process_product(product: ProductData, api_client: Any) -> dict:
     """Process one validated product."""
-    result = safely_generate_listing_for_product(product, client)
+    result = safely_generate_listing_for_product(product, api_client)
     return format_output(product, result)
 
 
-def process_product_row(product_row: Any, client: OpenAI) -> dict:
+def process_product_row(product_row: Any, api_client: Any) -> dict:
     """Validate and process one product row."""
     try:
         product = build_product_data(product_row)
-        return process_product(product, client)
+        return process_product(product, api_client)
     except Exception as error:
         print_error(
             "process_product_row",
@@ -620,7 +728,7 @@ def print_summary(summary: dict, output_path: Path) -> None:
 
 def process_multiple_products(
     df: pd.DataFrame,
-    client: OpenAI,
+    api_client: Any,
     num_products: int = DEFAULT_NUM_PRODUCTS,
     request_delay: int = REQUEST_DELAY_SECONDS,
 ) -> list[dict]:
@@ -630,7 +738,7 @@ def process_multiple_products(
 
     for i, product_row in enumerate(product_rows):
         product = build_product_data(product_row)
-        results.append(process_product(product, client))
+        results.append(process_product(product, api_client))
         wait_before_next_request(i, len(product_rows), request_delay)
 
     return results
@@ -643,7 +751,7 @@ def save_results(results: list[dict], output_path: str | Path = OUTPUT_PATH) -> 
 
 def run_product_batch(
     df: pd.DataFrame,
-    client: OpenAI,
+    api_client: Any,
     num_products: int = DEFAULT_NUM_PRODUCTS,
     output_path: Path = OUTPUT_PATH,
     request_delay: int = REQUEST_DELAY_SECONDS,
@@ -659,7 +767,7 @@ def run_product_batch(
         product = build_product_data(product_row)
         print_product_progress(i, total, product.product_name)
 
-        formatted_result = process_product(product, client)
+        formatted_result = process_product(product, api_client)
         results.append(formatted_result)
 
         print_result_status(formatted_result)
@@ -674,8 +782,8 @@ def run_product_batch(
     return results
 
 
-def create_openai_client() -> OpenAI:
-    """Initialize the OpenAI client from environment variables."""
+def create_openai_client() -> OpenAIWrapper:
+    """Initialize the OpenAI API wrapper from environment variables."""
     api_key = os.getenv("OPENAI_API_KEY")
     if not api_key:
         error = ValueError("OPENAI_API_KEY is not set")
@@ -687,12 +795,16 @@ def create_openai_client() -> OpenAI:
         )
         raise error
     try:
-        return OpenAI(api_key=api_key)
+        return OpenAIWrapper(
+            api_key=api_key,
+            max_retries=DEFAULT_MAX_RETRIES,
+            backoff_seconds=DEFAULT_BACKOFF_SECONDS,
+        )
     except Exception as error:
         print_error(
             "create_openai_client",
             error,
-            "OpenAI client initialization",
+            "OpenAI wrapper initialization",
             "Check that the OpenAI package is installed and the API key value is valid.",
         )
         raise
